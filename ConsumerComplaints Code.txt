@@ -1,0 +1,227 @@
+$todaysdate=Get-Date -Format "MM-dd-yyyy-hh-mm-ss"
+$logfilepath="C:\Users\skrishnadodda\Desktop\Logs\"+$todaysdate+".log"
+$logId="C:\Users\skrishnadodda\Desktop\Id\"+$todaysdate+".log"
+$logAttachments="C:\Users\skrishnadodda\Desktop\Attachments\"+$todaysdate+".log"
+Start-Transcript -Path $logfilepath
+$SiteUrl = "https://connect.xlcatlin.com/sites/ConsumerComplaints"
+$ListName = "Consumer Complaints"
+$CSVPath = "C:\Users\skrishnadodda\Desktop\ccomplaintsdata_03Sep2022 hi - Copy.csv"
+$SourceFolderPath = "\\stafi0004\shared1\Domino\Hari\ccomplaints03Sep2022"
+$LibraryName="Consumer Complaints Attachments"
+$FN = "CCID"
+$Fn2="Name"
+$HoldingCsv=@()
+Function Get-LookupID($ListName, $LookupFieldName, $LookupValue)
+{
+    #Get Parent Lookup List and Field from Child Lookup Field's Schema XML
+    $LookupField =  Get-PnPField -List $ListName -Identity $LookupFieldName
+    [Xml]$Schema = $LookupField.SchemaXml
+    $ParentListID = $Schema.Field.Attributes["List"].'#text'
+    $ParentField  = $Schema.field.Attributes["ShowField"].'#text'
+    $ParentLookupItem  = Get-PnPListItem -List $ParentListID -Fields $ParentField | Where {$_[$ParentField] -eq $LookupValue} | Select -First 1
+    If($ParentLookupItem -ne $Null)  { Return $ParentLookupItem["ID"] }  Else  { Return $Null }
+}
+
+Try
+{
+#Connect to site
+#The app identifier has been successfully created.
+#Client Id:  	079c19d3-a787-4c34-addd-fab99c82b2b8
+#Client Secret:  	C7F7ScYeISt/RAFyu/m/rnV+O9dHSSkXk4tww34+MpM=
+#Title:  	ConsumerComplaintsApp
+#App Domain:  	www.localhost.com
+#Redirect URI:  	https://www.localhost.com
+
+Connect-PnPOnline -Url https://connect.xlcatlin.com/sites/ConsumerComplaints -ClientId 079c19d3-a787-4c34-addd-fab99c82b2b8 -ClientSecret "C7F7ScYeISt/RAFyu/m/rnV+O9dHSSkXk4tww34+MpM="
+
+
+#Get the CSV file contents
+$CSVData = Import-CsV -Path $CSVPath
+
+#Get All Files from the Source Folder
+#$Files = Get-ChildItem -Path $SourceFolderPath -Recurse | Where {!$_.PSIsContainer }
+
+#Get the List to Add Items
+$List = Get-PnPList -Identity $ListName
+
+$ListFields = Get-PnPField -List $ListName | Where { (-Not ($_.ReadOnlyField)) -and (-Not ($_.Hidden)) -and ($_.InternalName -ne  "ContentType") -and ($_.InternalName -ne "Attachments")}
+
+#Loop through each Row in the CSV file and update the matching list item ID
+ForEach($Row in $CSVData)
+    {
+       # Add-PnPListItem -List $ListName -Values @{"Title" = $($Row.ComplaintNumber);}
+        #Frame the List Item to update
+        $ItemValue = @{}
+        $AttachmentArray           
+        $CSVFields = $Row | Get-Member -MemberType NoteProperty | Select -ExpandProperty Name
+        $ItemValue.Add("Title",$Row.ComplaintNumber)
+        #get docid
+        $gDocId=$Row.Docid
+        #$gDocId
+        
+        #Map each field from CSV to target list
+        Foreach($CSVField in $CSVFields)
+        {  
+            
+            $MappedField = $ListFields | Where {$_.InternalName -eq $CSVField}
+            If($MappedField -ne $Null)
+            {
+                $FieldName = $MappedField.InternalName
+                #Check if the Field value is not Null
+                If($Row.$CSVField -ne $Null)
+                {
+                    #Handle Special Fields
+                    $FieldType  = $MappedField.TypeAsString
+                    If($FieldType -eq "DateTime") #Date/Time Field
+                    {
+                            
+                            $DateTimefield=$Row.$FieldName
+                            If($DateTimefield -eq "")
+                            {
+                                $NullDate="01/01/0001"
+                                $DateFormatVal=[datetime]::ParseExact($NullDate, 'MM/dd/yyyy', $null)
+                               # $ItemValue.add($FieldName,$DateFormatVal)
+                            }
+                            Else{
+                            $DateFormatValues=[datetime]::ParseExact($DateTimefield, 'dd-MM-yyyy', $null)
+                            $ItemValue.add($FieldName,$DateFormatValues)
+                            Write-host $DateFormatValues
+                            }
+                             
+
+                        }
+                            ElseIf($FieldType -eq "Lookup" -or $FieldType -eq "LookupMulti") #Lookup Field
+                            {
+                                $LookupIDs = $Row.$FieldName.Split(",") | ForEach-Object { Get-LookupID -ListName $ListName -LookupFieldName $FieldName -LookupValue $_ }               
+                                $ItemValue.Add($FieldName,$LookupIDs)
+                            }
+
+                        Else
+                        {
+                        
+                            $ItemValue.Add($FieldName,$Row.$FieldName)
+                        }  
+                    }
+                
+                    $Attachmentnames=$Row.Attachments
+                    $AttachmentArray = $Attachmentnames.split("/")    
+                   
+                                   
+                }
+            
+            
+        }
+
+        Write-host "Adding List item with values:"
+        $Table=$ItemValue | Format-Table
+        $Table
+        #Add New List Item
+        $ListItem=Add-PnPListItem -List $ListName -Values $ItemValue
+        $SharePointId= $ListItem.Id
+        $AddId=$ItemValue.Add("ID",$SharePointId)
+         ForEach($Values in $ItemValue)
+        {
+            
+            $CreatingCsv=New-Object -Type PSObject -Property $Values
+            $HoldingCsv += $CreatingCsv
+           
+            
+        }
+        $HoldingCsv|Export-Csv 'C:\Users\skrishnadodda\Desktop\Update.csv' -NoTypeInformation
+        
+        $SharePointId>>$logId
+        $Files = Get-ChildItem -Path $SourceFolderPath  | Sort-Object -Property CreationTime
+        $Filterdocid=Get-ChildItem -Path $SourceFolderPath -Filter $gDocId
+        $checkinfiledirec=$Filterdocid.Name
+        $checkinfiledirec
+        #Checking if Docid in Excel/CSV eq Docid in File direc
+        If($gDocId -eq $checkinfiledirec)
+        {
+            $getinsidefolder=Get-ChildItem -Path $SourceFolderPath\$checkinfiledirec
+            write-host Files present in $gDocId are $getinsidefolder
+            foreach($gif in $getinsidefolder)
+            {
+                $AttachmentFiles = Get-PnPProperty -ClientObject $ListItem -Property "AttachmentFiles"
+                   If($AttachmentFiles)
+                     {
+                                    $AttachmentInfo = New-Object -TypeName Microsoft.SharePoint.Client.AttachmentCreationInformation
+                                    $AttachmentInfo.FileName =  $gif.Name
+                                    $AttachmentInfo.ContentStream = $gif.OpenRead()
+                                    $AttchedFile = $ListItem.AttachmentFiles.Add($AttachmentInfo)
+                                    $F=$gDocId+", "+$gif.Name +", "+ $SharePointId
+                                    Write-Host "Uploaded to SharePoint" $F -ForegroundColor Green        
+                      }             
+              }
+                #Create a Folder in Doc library With SharepointID
+                $TargetFolderURL=$SiteUrl+"/"+"ConsumerComplaintsAttachments"
+                $fileItems=$SourceFolderPath+"/"+$checkinfiledirec
+                $FolderItems=Get-ChildItem -Path $fileItems -Recurse
+                Add-PnPFolder -Name $checkinfiledirec -Folder $TargetFolderURL -ErrorAction Stop
+                $FolderFN=$FolderItems.Name
+                $FolderFN
+                $DestinationPath=$TargetFolderURL+"/"+$checkinfiledirec
+                $RegexFFN= $FolderFN -replace '[^\p{L}\p{Nd}]', ''
+                $RegexExcelFN=$AttachmentArray -replace '[^\p{L}\p{Nd}]', ''
+                $RegexFFNarray=@($RegexFFN)
+                $RegexExcelFNarray=@($RegexExcelFN)
+
+                $RegexExcelFNarray| ForEach-Object {
+
+                                if($RegexFFNarray -contains $_)
+                                {
+                                    foreach($FFN in $FolderFN)
+                                            {
+                                                $Filepath=$fileItems+"/"+$FFN
+                
+                                                    foreach($FP in $Filepath )
+                                                    {
+                                                        $FPgetName=Get-Item $FP
+                                                        $FPName=$FPgetName.Name
+                                                        $RegexFPName=$FPName -replace '[^\p{L}\p{Nd}]', ''
+                                                        if($RegexFPName -eq $_){
+                                                        $AddingFile=Add-PnPFile -Path $FP -Folder $DestinationPath
+                                                        $AFileName=$AddingFile.Name
+                                                        #get file id from sharepoint doc library
+                                                        $getLink="/sites/ConsumerComplaints/ConsumerComplaintsAttachments"+"/"+$checkinfiledirec+"/"+$AFileName
+                                                        $fileItem=Get-PnPFile -Url $getLink -AsListItem
+                                                        $FileNamesID=$fileItem.Id
+                                                        Set-PnPListItem -List $LibraryName  -Identity $FileNamesID -Values @{$FN = $SharePointId}
+                    
+                                                        $renameFolderURL="ConsumerComplaintsAttachments"+"/"+$checkinfiledirec
+                                                        #$renameFolderURL
+                    
+                                                        }
+                                                    }
+                
+
+                                            }
+                                }
+
+                            }
+                #update Sharepointid to FolderName
+                Rename-PnPFolder -Folder $renameFolderURL -TargetFolderName $SharePointId
+                     
+            
+        }
+            Else
+                {
+                    Write-Host $gDocId "Doesnot Exist in Source Path:" $gif.Name -ForegroundColor Red
+                    $FDE=$gDocId+", "+$gif.Name+", "+$SharePointId
+                    $FDE >>$logAttachments
+                }
+            
+           
+       
+   }
+
+
+}
+Catch
+{
+ write-host "Error: $($_.Exception.Message)" -foregroundcolor Red
+}
+
+
+
+
+Stop-Transcript
